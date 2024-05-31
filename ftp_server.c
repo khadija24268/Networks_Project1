@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <ctype.h>
+#include <sys/wait.h>
 
 #define MAX 80
 #define PORT 8080
@@ -187,10 +188,8 @@ void handle_list(int client_socket, int data_socket) {
     }
 }
 
-void handle_client(int client_socket) {
+void handle_client(int client_socket, int logged_in, int user_index) {
     char buff[MAX];
-    int logged_in = 0;
-    int user_index = -1;
     int data_socket = -1;
     char client_ip[16];
     int client_port = -1;
@@ -270,44 +269,45 @@ void handle_client(int client_socket) {
                 }
             } else if (strcmp(command, "RETR") == 0) {
                 if (data_socket != -1 && argument) {
-                    handle_retr(client_socket, data_socket, argument);
+                    if (fork() == 0) {
+                        handle_retr(client_socket, data_socket, argument);
+                        exit(0);
+                    }
+                    close(data_socket);
                     data_socket = -1;
                 } else {
                     send_response(client_socket, "425 Use PORT command to specify data connection first.\n");
                 }
             } else if (strcmp(command, "STOR") == 0) {
                 if (data_socket != -1 && argument) {
-                    handle_stor(client_socket, data_socket, argument);
+                    if (fork() == 0) {
+                        handle_stor(client_socket, data_socket, argument);
+                        exit(0);
+                    }
+                    close(data_socket);
                     data_socket = -1;
                 } else {
                     send_response(client_socket, "425 Use PORT command to specify data connection first.\n");
                 }
             } else if (strcmp(command, "LIST") == 0) {
                 if (data_socket != -1) {
-                    handle_list(client_socket, data_socket);
+                    if (fork() == 0) {
+                        handle_list(client_socket, data_socket);
+                        exit(0);
+                    }
+                    close(data_socket);
                     data_socket = -1;
                 } else {
                     send_response(client_socket, "425 Use PORT command to specify data connection first.\n");
                 }
             } else if (strcmp(command, "CWD") == 0) {
                 if (argument) {
-                    if (chdir(argument) == 0) {
-                        send_response(client_socket, "250 Directory successfully changed.\n");
-                    } else {
-                        send_response(client_socket, "550 Failed to change directory.\n");
-                    }
+                    handle_cwd(client_socket, argument);
                 } else {
                     send_response(client_socket, "501 Syntax error in parameters or arguments.\n");
                 }
             } else if (strcmp(command, "PWD") == 0) {
-                char cwd[1024];
-                if (getcwd(cwd, sizeof(cwd)) != NULL) {
-                    char msg[1060];
-                    sprintf(msg, "257 \"%s\" is the current directory.\n", cwd);
-                    send_response(client_socket, msg);
-                } else {
-                    send_response(client_socket, "550 Get current directory failed.\n");
-                }
+                handle_pwd(client_socket);
             } else {
                 send_response(client_socket, "502 Command not implemented.\n");
             }
@@ -389,9 +389,32 @@ int main() {
             sd = client_socket[i];
 
             if (FD_ISSET(sd, &readfds)) {
-                handle_client(sd);
+                int logged_in = 0;
+                int user_index = -1;
+
+                // Create a new process to handle the client
+                pid_t pid = fork();
+                if (pid < 0) {
+                    perror("fork");
+                    exit(EXIT_FAILURE);
+                }
+
+                if (pid == 0) {
+                    // Child process
+                    close(server_socket); // Child doesn't need the listener
+                    handle_client(sd, logged_in, user_index);
+                    close(sd);
+                    exit(0);
+                } else {
+                    // Parent process
+                    close(sd); // Parent doesn't need this
+                    client_socket[i] = 0;
+                }
             }
         }
+
+        // Clean up any zombie processes
+        while (waitpid(-1, NULL, WNOHANG) > 0);
     }
     return 0;
 }

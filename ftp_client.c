@@ -17,15 +17,26 @@ void trim_newline(char *str) {
     }
 }
 
+void read_response(int sock) {
+    char response[MAX];
+    while (1) {
+        bzero(response, MAX);
+        int bytes = recv(sock, response, MAX, 0);
+        if (bytes <= 0) {
+            break;
+        }
+        printf("%s", response);
+        if (bytes < MAX || response[bytes - 1] == '\n') {
+            break;
+        }
+    }
+}
+
 void send_command_and_wait(int sock, const char *command) {
     char full_command[MAX + 2];
     snprintf(full_command, sizeof(full_command), "%s\r\n", command);
     send(sock, full_command, strlen(full_command), 0);
-
-    char response[MAX];
-    bzero(response, MAX);
-    recv(sock, response, MAX, 0);
-    printf("%s", response);
+    read_response(sock);
 }
 
 int setup_data_connection(int *data_socket, int *client_port) {
@@ -51,7 +62,6 @@ int setup_data_connection(int *data_socket, int *client_port) {
     close(*data_socket);
     return -1;
 }
-
 
 int handle_data_connection(int data_socket, const char *filename, int is_retr) {
     struct sockaddr_in cli;
@@ -93,17 +103,10 @@ int handle_data_connection(int data_socket, const char *filename, int is_retr) {
 
     fclose(file);
     close(conn);
-    close(data_socket);  // Ensure the data socket is closed here
-
-    // Wait for the server's final response
-    char response[MAX];
-    bzero(response, MAX);
-    recv(data_socket, response, MAX, 0);
-    printf("%s", response);
+    close(data_socket);
 
     return 0;
 }
-
 
 void func(int sock) {
     char buff[MAX];
@@ -151,12 +154,12 @@ void func(int sock) {
                 } else if (strcmp(command, "LIST") == 0) {
                     handle_data_connection(data_socket, "listing.txt", 1);
                 }
+                read_response(sock);  // Read the final response after data connection handling
                 data_socket = -1;
             }
         }
     }
 }
-
 
 int main() {
     int sock;
