@@ -121,7 +121,10 @@ void handle_retr(int client_socket, int data_socket, char *filename) {
     char buffer[1024];
     int bytes_read;
     while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        send(data_socket, buffer, bytes_read, 0);
+        if (send(data_socket, buffer, bytes_read, 0) < 0) {
+            perror("Error sending file data");
+            break;
+        }
     }
     fclose(file);
     close(data_socket);
@@ -163,7 +166,7 @@ void handle_pwd(int client_socket) {
     char cwd[1024];
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
         char msg[1060];
-        sprintf(msg, "257 \"%s\" is the current directory.\r\n", cwd);
+        snprintf(msg, sizeof(msg), "257 \"%s\" is the current directory.\r\n", cwd);
         send_response(client_socket, msg);
     } else {
         send_response(client_socket, "550 Get current directory failed.\r\n");
@@ -177,14 +180,44 @@ void handle_list(int client_socket, int data_socket) {
     if (d) {
         send_response(client_socket, "150 File status okay; about to open data connection.\r\n");
         while ((dir = readdir(d)) != NULL) {
-            send(data_socket, dir->d_name, strlen(dir->d_name), 0);
-            send(data_socket, "\r\n", 2, 0);
+            char buffer[MAX];
+            snprintf(buffer, sizeof(buffer), "%s\r\n", dir->d_name);
+            send(data_socket, buffer, strlen(buffer), 0);
         }
         closedir(d);
         close(data_socket);
         send_response(client_socket, "226 Transfer completed.\r\n");
     } else {
         send_response(client_socket, "550 Failed to open directory.\r\n");
+    }
+}
+
+void handle_list_control(int client_socket) {
+    DIR *d;
+    struct dirent *dir;
+    d = opendir(".");
+    if (d) {
+        send_response(client_socket, "150 Here comes the directory listing.\r\n");
+        while ((dir = readdir(d)) != NULL) {
+            char buffer[MAX];
+            snprintf(buffer, sizeof(buffer), "%s\r\n", dir->d_name);
+            send_response(client_socket, buffer);
+        }
+        closedir(d);
+        send_response(client_socket, "226 Directory send OK.\r\n");
+    } else {
+        send_response(client_socket, "550 Failed to open directory.\r\n");
+    }
+}
+
+void handle_pwd_control(int client_socket) {
+    char cwd[1024];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        char msg[1060];
+        snprintf(msg, sizeof(msg), "257 \"%s\" is the current directory.\r\n", cwd);
+        send_response(client_socket, msg);
+    } else {
+        send_response(client_socket, "550 Get current directory failed.\r\n");
     }
 }
 
@@ -213,8 +246,10 @@ void handle_client(int client_socket, int logged_in, int user_index) {
             continue;
         }
 
+        trim_whitespace(command);
         trim_newline(command);
         if (argument) {
+            trim_whitespace(argument);
             trim_newline(argument);
         }
 
@@ -255,7 +290,7 @@ void handle_client(int client_socket, int logged_in, int user_index) {
                 if (argument) {
                     int h1, h2, h3, h4, p1, p2;
                     sscanf(argument, "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2);
-                    sprintf(client_ip, "%d.%d.%d.%d", h1, h2, h3, h4);
+                    snprintf(client_ip, sizeof(client_ip), "%d.%d.%d.%d", h1, h2, h3, h4);
                     client_port = p1 * 256 + p2;
                     printf("Client IP: %s, Client Port: %d\n", client_ip, client_port);
                     data_socket = start_data_connection(client_ip, client_port);
@@ -300,6 +335,10 @@ void handle_client(int client_socket, int logged_in, int user_index) {
                 } else {
                     send_response(client_socket, "425 Use PORT command to specify data connection first.\n");
                 }
+            } else if (strcmp(command, "!LIST") == 0) {
+                handle_list_control(client_socket);
+            } else if (strcmp(command, "!PWD") == 0) {
+                handle_pwd_control(client_socket);
             } else if (strcmp(command, "CWD") == 0) {
                 if (argument) {
                     handle_cwd(client_socket, argument);
@@ -313,6 +352,10 @@ void handle_client(int client_socket, int logged_in, int user_index) {
             }
         }
     }
+}
+
+void cleanup_zombie_processes() {
+    while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
 int main() {
@@ -339,7 +382,10 @@ int main() {
     }
     printf("Socket successfully binded..\n");
 
-    listen(server_socket, 5);
+    if (listen(server_socket, 5) != 0) {
+        perror("Listen failed");
+        exit(EXIT_FAILURE);
+    }
     printf("Server listening..\n");
 
     for (i = 0; i < MAX_CLIENTS; i++) {
@@ -392,7 +438,6 @@ int main() {
                 int logged_in = 0;
                 int user_index = -1;
 
-                // Create a new process to handle the client
                 pid_t pid = fork();
                 if (pid < 0) {
                     perror("fork");
@@ -400,21 +445,18 @@ int main() {
                 }
 
                 if (pid == 0) {
-                    // Child process
-                    close(server_socket); // Child doesn't need the listener
+                    close(server_socket);
                     handle_client(sd, logged_in, user_index);
                     close(sd);
                     exit(0);
                 } else {
-                    // Parent process
-                    close(sd); // Parent doesn't need this
+                    close(sd);
                     client_socket[i] = 0;
                 }
             }
         }
 
-        // Clean up any zombie processes
-        while (waitpid(-1, NULL, WNOHANG) > 0);
+        cleanup_zombie_processes();
     }
     return 0;
 }

@@ -125,12 +125,34 @@ void func(int sock) {
             if (strcmp(command, "RETR") == 0 || strcmp(command, "STOR") == 0 || strcmp(command, "LIST") == 0) {
                 if (setup_data_connection(&data_socket, &client_port) != -1) {
                     char port_command[MAX];
-                    sprintf(port_command, "PORT 127,0,0,1,%d,%d", client_port / 256, client_port % 256);
+                    snprintf(port_command, sizeof(port_command), "PORT 127,0,0,1,%d,%d", client_port / 256, client_port % 256);
                     send_command_and_wait(sock, port_command);
                 } else {
                     printf("Failed to setup data connection\n");
                     continue;
                 }
+            } else if (strcmp(command, "!PWD") == 0) {
+                char cwd[1024];
+                if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                    printf("257 \"%s\" is the current directory.\r\n", cwd);
+                } else {
+                    printf("550 Get current directory failed.\r\n");
+                }
+                continue;
+            } else if (strcmp(command, "!LIST") == 0) {
+                system("ls");
+                continue;
+            } else if (strcmp(command, "!CWD") == 0) {
+                if (argument) {
+                    if (chdir(argument) == 0) {
+                        printf("250 Directory successfully changed.\r\n");
+                    } else {
+                        printf("550 Failed to change directory.\r\n");
+                    }
+                } else {
+                    printf("501 Syntax error in parameters or arguments.\r\n");
+                }
+                continue;
             }
 
             char command_with_args[MAX + 5];
@@ -152,9 +174,9 @@ void func(int sock) {
                 } else if (strcmp(command, "STOR") == 0) {
                     handle_data_connection(data_socket, argument, 0);
                 } else if (strcmp(command, "LIST") == 0) {
-                    handle_data_connection(data_socket, "listing.txt", 1);
+                    handle_data_connection(data_socket, NULL, 1);
                 }
-                read_response(sock);  // Read the final response after data connection handling
+                read_response(sock);
                 data_socket = -1;
             }
         }
