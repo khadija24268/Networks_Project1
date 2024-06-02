@@ -17,26 +17,33 @@ void trim_newline(char *str) {
     }
 }
 
-void read_response(int sock) {
-    char response[MAX];
+int read_response(int sock, char *response) {
+    char buffer[MAX];
+    int bytes_read = 0;
     while (1) {
-        bzero(response, MAX);
-        int bytes = recv(sock, response, MAX, 0);
+        bzero(buffer, MAX);
+        int bytes = recv(sock, buffer, MAX, 0);
         if (bytes <= 0) {
             break;
         }
-        printf("%s", response);
-        if (bytes < MAX || response[bytes - 1] == '\n') {
+        printf("%s", buffer);
+        if (response != NULL) {
+            strcat(response, buffer);
+        }
+        bytes_read += bytes;
+        if (bytes < MAX || buffer[bytes - 1] == '\n') {
             break;
         }
     }
+    return bytes_read;
 }
 
-void send_command_and_wait(int sock, const char *command) {
+int send_command_and_wait(int sock, const char *command, char *response) {
     char full_command[MAX + 2];
     snprintf(full_command, sizeof(full_command), "%s\r\n", command);
     send(sock, full_command, strlen(full_command), 0);
-    read_response(sock);
+    bzero(response, MAX);
+    return read_response(sock, response);
 }
 
 int setup_data_connection(int *data_socket, int *client_port) {
@@ -63,7 +70,7 @@ int setup_data_connection(int *data_socket, int *client_port) {
     return -1;
 }
 
-int handle_data_connection(int data_socket, const char *filename, int is_retr) {
+int handle_data_connection(int data_socket, const char *filename, int is_retr, int is_list) {
     struct sockaddr_in cli;
     int len = sizeof(cli);
     int conn = accept(data_socket, (SA*)&cli, &len);
@@ -72,36 +79,43 @@ int handle_data_connection(int data_socket, const char *filename, int is_retr) {
         return -1;
     }
 
-    FILE *file = NULL;
-    if (is_retr) {
-        file = fopen(filename, "wb");
-        if (!file) {
-            printf("Failed to open file for writing: %s\n", filename);
-            close(conn);
-            return -1;
-        }
-    } else {
-        file = fopen(filename, "rb");
-        if (!file) {
-            printf("Failed to open file for reading: %s\n", filename);
-            close(conn);
-            return -1;
-        }
-    }
-
-    char buffer[MAX];
-    int bytes;
-    if (is_retr) {
+    if (is_list) {
+        char buffer[MAX];
+        int bytes;
         while ((bytes = recv(conn, buffer, sizeof(buffer), 0)) > 0) {
-            fwrite(buffer, 1, bytes, file);
+            buffer[bytes] = '\0';
+            printf("%s", buffer);
         }
     } else {
-        while ((bytes = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-            send(conn, buffer, bytes, 0);
+        FILE *file = NULL;
+        if (is_retr) {
+            file = fopen(filename, "wb");
+            if (!file) {
+                printf("550 No Such File or Directory.\n");
+                close(conn);
+                return -1;
+            }
+            char buffer[MAX];
+            int bytes;
+            while ((bytes = recv(conn, buffer, sizeof(buffer), 0)) > 0) {
+                fwrite(buffer, 1, bytes, file);
+            }
+            fclose(file);
+        } else {
+            file = fopen(filename, "rb");
+            if (!file) {
+                close(conn);
+                return -1;
+            }
+            char buffer[MAX];
+            int bytes;
+            while ((bytes = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+                send(conn, buffer, bytes, 0);
+            }
+            fclose(file);
         }
     }
 
-    fclose(file);
     close(conn);
     close(data_socket);
 
@@ -110,7 +124,10 @@ int handle_data_connection(int data_socket, const char *filename, int is_retr) {
 
 void func(int sock) {
     char buff[MAX];
+    char response[MAX];
     int data_socket = -1, client_port = -1;
+
+    int authenticated = 0; // Add this flag to track if the user is authenticated
 
     for (;;) {
         printf("ftp> ");
@@ -122,15 +139,16 @@ void func(int sock) {
         char* argument = strtok(NULL, " ");
 
         if (command != NULL) {
-            if (strcmp(command, "RETR") == 0 || strcmp(command, "STOR") == 0 || strcmp(command, "LIST") == 0) {
-                if (setup_data_connection(&data_socket, &client_port) != -1) {
-                    char port_command[MAX];
-                    snprintf(port_command, sizeof(port_command), "PORT 127,0,0,1,%d,%d", client_port / 256, client_port % 256);
-                    send_command_and_wait(sock, port_command);
-                } else {
-                    printf("Failed to setup data connection\n");
-                    continue;
-                }
+            int is_retr = 0;
+            int is_stor = 0;
+            int is_list = 0;
+
+            if (strcmp(command, "RETR") == 0) {
+                is_retr = 1;
+            } else if (strcmp(command, "STOR") == 0) {
+                is_stor = 1;
+            } else if (strcmp(command, "LIST") == 0) {
+                is_list = 1;
             } else if (strcmp(command, "!PWD") == 0) {
                 char cwd[1024];
                 if (getcwd(cwd, sizeof(cwd)) != NULL) {
@@ -147,12 +165,27 @@ void func(int sock) {
                     if (chdir(argument) == 0) {
                         printf("250 Directory successfully changed.\r\n");
                     } else {
-                        printf("550 Failed to change directory.\r\n");
+                        printf("550 No Such File or Directory.\n");
                     }
                 } else {
                     printf("501 Syntax error in parameters or arguments.\r\n");
                 }
                 continue;
+            }
+
+            if (is_retr || is_stor || is_list) {
+                if (!authenticated) {
+                    printf("Please login with USER and PASS first.\n");
+                    continue;
+                }
+                if (setup_data_connection(&data_socket, &client_port) != -1) {
+                    char port_command[MAX];
+                    sprintf(port_command, "PORT 127,0,0,1,%d,%d", client_port / 256, client_port % 256);
+                    send_command_and_wait(sock, port_command, response);
+                } else {
+                    printf("Failed to setup data connection\n");
+                    continue;
+                }
             }
 
             char command_with_args[MAX + 5];
@@ -161,7 +194,14 @@ void func(int sock) {
             } else {
                 strncpy(command_with_args, command, sizeof(command_with_args));
             }
-            send_command_and_wait(sock, command_with_args);
+            send_command_and_wait(sock, command_with_args, response);
+
+            // Check for successful login
+            if (strcmp(command, "USER") == 0 || strcmp(command, "PASS") == 0) {
+                if (strstr(response, "230 User logged in") != NULL) {
+                    authenticated = 1; // Set the flag to indicate successful authentication
+                }
+            }
 
             if (strncmp(buff, "QUIT", 4) == 0) {
                 printf("Client Exit...\n");
@@ -169,14 +209,14 @@ void func(int sock) {
             }
 
             if (data_socket != -1) {
-                if (strcmp(command, "RETR") == 0) {
-                    handle_data_connection(data_socket, argument, 1);
-                } else if (strcmp(command, "STOR") == 0) {
-                    handle_data_connection(data_socket, argument, 0);
-                } else if (strcmp(command, "LIST") == 0) {
-                    handle_data_connection(data_socket, NULL, 1);
+                if (is_retr) {
+                    handle_data_connection(data_socket, argument, 1, 0);
+                } else if (is_stor) {
+                    handle_data_connection(data_socket, argument, 0, 0);
+                } else if (is_list) {
+                    handle_data_connection(data_socket, NULL, 0, 1);
                 }
-                read_response(sock);
+                read_response(sock, NULL);  // Read the final response after data connection handling
                 data_socket = -1;
             }
         }

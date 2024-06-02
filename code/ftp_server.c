@@ -26,7 +26,7 @@ User users[100];
 int user_count = 0;
 
 void load_users() {
-    FILE *file = fopen("users.txt", "r");
+    FILE *file = fopen("../users.txt", "r");
     if (!file) {
         perror("Could not open users.txt");
         exit(1);
@@ -111,12 +111,17 @@ void handle_retr(int client_socket, int data_socket, char *filename) {
     trim_whitespace(filename);
     trim_newline(filename);
     FILE *file = fopen(filename, "rb");
+    int file_success=1;
     if (!file) {
-        send_response(client_socket, "550 File not found.\n");
-        return;
+        fclose(file);
+        close(data_socket);
+        send_response(client_socket, "550 No Such File or Directory.\n");
+        file_success=0;
+
     }
 
     send_response(client_socket, "150 Opening binary mode data connection for file transfer.\n");
+
 
     char buffer[1024];
     int bytes_read;
@@ -126,17 +131,28 @@ void handle_retr(int client_socket, int data_socket, char *filename) {
             break;
         }
     }
-    fclose(file);
+    
+    fclose(file);   
+    printf("Failed to open file: %s\n", filename);
     close(data_socket);
-    send_response(client_socket, "226 Transfer complete.\n");
+
+    if (file_success==1){
+        send_response(client_socket, "226 Transfer complete.\n");
+    }
+    else{
+        send_response(client_socket, "550 No Such File or Directory.\n");
+    }
+
 }
 
 void handle_stor(int client_socket, int data_socket, char *filename) {
+    printf("Storing file: %s\n", filename);
     trim_whitespace(filename);
     trim_newline(filename);
     FILE *file = fopen(filename, "wb");
     if (!file) {
         send_response(client_socket, "550 Could not open file.\n");
+        close(data_socket); 
         return;
     }
 
@@ -144,13 +160,23 @@ void handle_stor(int client_socket, int data_socket, char *filename) {
 
     char buffer[1024];
     int bytes_received;
+    int transfer_successful = 0; // Flag to track if the transfer was successful
     while ((bytes_received = recv(data_socket, buffer, sizeof(buffer), 0)) > 0) {
+        transfer_successful=1;
         fwrite(buffer, 1, bytes_received, file);
     }
+
     fclose(file);
     close(data_socket);
-    send_response(client_socket, "226 Transfer complete.\n");
+
+    if (transfer_successful) {
+        send_response(client_socket, "226 Transfer complete.\n");
+    }
+    else {
+        send_response(client_socket, "550 No Such File or Directory.\n");
+    } 
 }
+
 
 void handle_cwd(int client_socket, char *directory) {
     trim_whitespace(directory);
